@@ -84,7 +84,8 @@ struct swaylock_args {
 
 struct swaylock_password {
 	size_t len;
-	char buffer[1024];
+	size_t buffer_len;
+	char *buffer;
 };
 
 struct swaylock_state {
@@ -110,6 +111,8 @@ struct swaylock_state {
 	size_t n_screenshots_done;
 	bool run_display;
 	struct zxdg_output_manager_v1 *zxdg_output_manager;
+	struct ext_session_lock_manager_v1 *ext_session_lock_manager_v1;
+	struct ext_session_lock_v1 *ext_session_lock_v1;
 };
 
 struct swaylock_surface {
@@ -128,6 +131,7 @@ struct swaylock_surface {
 	struct wl_surface *child; // surface made into subsurface
 	struct wl_subsurface *subsurface;
 	struct zwlr_layer_surface_v1 *layer_surface;
+	struct ext_session_lock_surface_v1 *ext_session_lock_surface_v1;
 	struct zwlr_screencopy_frame_v1 *screencopy_frame;
 	struct pool_buffer buffers[2];
 	struct pool_buffer indicator_buffers[2];
@@ -161,7 +165,6 @@ void render_frame_background(struct swaylock_surface *surface);
 void render_background_fade(struct swaylock_surface *surface, uint32_t time);
 void render_background_fade_prepare(struct swaylock_surface *surface, struct pool_buffer *buffer);
 void render_frame(struct swaylock_surface *surface);
-void render_frames(struct swaylock_state *state);
 void damage_surface(struct swaylock_surface *surface);
 void damage_state(struct swaylock_state *state);
 void clear_password_buffer(struct swaylock_password *pw);

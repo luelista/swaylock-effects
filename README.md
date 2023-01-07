@@ -90,9 +90,8 @@ Install dependencies:
 * git \*
 * openmp (if using a compiler other than GCC)
 
-_\*Compile-time dep_
-
-_\*\*Optional: required for background images other than PNG_
+_\* Compile-time dep_  
+_\*\* Optional: required for background images other than PNG_
 
 Run these commands:
 

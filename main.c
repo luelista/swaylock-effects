@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,7 @@
 #include "comm.h"
 #include "log.h"
 #include "loop.h"
+#include "password-buffer.h"
 #include "pool-buffer.h"
 #include "seat.h"
 #include "swaylock.h"
@@ -27,6 +29,7 @@
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "wlr-screencopy-unstable-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
+#include "ext-session-lock-v1-client-protocol.h"
 
 // returns a positive integer in milliseconds
 static uint32_t parse_seconds(const char *seconds) {
@@ -246,6 +249,9 @@ static void destroy_surface(struct swaylock_surface *surface) {
 	if (surface->layer_surface != NULL) {
 		zwlr_layer_surface_v1_destroy(surface->layer_surface);
 	}
+	if (surface->ext_session_lock_surface_v1 != NULL) {
+		ext_session_lock_surface_v1_destroy(surface->ext_session_lock_surface_v1);
+	}
 	if (surface->surface != NULL) {
 		wl_surface_destroy(surface->surface);
 	}
@@ -259,6 +265,7 @@ static void destroy_surface(struct swaylock_surface *surface) {
 }
 
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener;
+static const struct ext_session_lock_surface_v1_listener ext_session_lock_surface_v1_listener;
 
 static cairo_surface_t *select_image(struct swaylock_state *state,
 		struct swaylock_surface *surface);
@@ -275,7 +282,7 @@ static bool surface_is_opaque(struct swaylock_surface *surface) {
 
 struct zxdg_output_v1_listener _xdg_output_listener;
 
-static void create_layer_surface(struct swaylock_surface *surface) {
+static void create_surface(struct swaylock_surface *surface) {
 	struct swaylock_state *state = surface->state;
 
 	if (state->args.fade_in) {
@@ -306,25 +313,33 @@ static void create_layer_surface(struct swaylock_surface *surface) {
 	assert(surface->subsurface);
 	wl_subsurface_set_sync(surface->subsurface);
 
-	surface->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-			state->layer_shell, surface->surface, surface->output,
-			ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "lockscreen");
-	assert(surface->layer_surface);
+	if (state->ext_session_lock_v1) {
+		surface->ext_session_lock_surface_v1 = ext_session_lock_v1_get_lock_surface(
+				state->ext_session_lock_v1, surface->surface, surface->output);
+		ext_session_lock_surface_v1_add_listener(surface->ext_session_lock_surface_v1,
+				&ext_session_lock_surface_v1_listener, surface);
+	} else {
+		surface->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+				state->layer_shell, surface->surface, surface->output,
+				ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "lockscreen");
 
-	zwlr_layer_surface_v1_set_size(surface->layer_surface, 0, 0);
-	zwlr_layer_surface_v1_set_anchor(surface->layer_surface,
-			ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
-			ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT |
-			ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
-			ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
-	zwlr_layer_surface_v1_set_exclusive_zone(surface->layer_surface, -1);
-	zwlr_layer_surface_v1_set_keyboard_interactivity(
-			surface->layer_surface, true);
-	zwlr_layer_surface_v1_add_listener(surface->layer_surface,
-			&layer_surface_listener, surface);
-	surface->events_pending += 1;
+		zwlr_layer_surface_v1_set_size(surface->layer_surface, 0, 0);
+		zwlr_layer_surface_v1_set_anchor(surface->layer_surface,
+				ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+				ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT |
+				ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+				ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
+		zwlr_layer_surface_v1_set_exclusive_zone(surface->layer_surface, -1);
+		zwlr_layer_surface_v1_set_keyboard_interactivity(
+				surface->layer_surface, true);
+		zwlr_layer_surface_v1_add_listener(surface->layer_surface,
+				&layer_surface_listener, surface);
+		surface->events_pending += 1;
+	}
 
-	wl_surface_commit(surface->surface);
+	if (!state->ext_session_lock_v1) {
+		wl_surface_commit(surface->surface);
+	}
 }
 
 static void initially_render_surface(struct swaylock_surface *surface) {
@@ -373,6 +388,23 @@ static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
 	.closed = layer_surface_closed,
 };
 
+static void ext_session_lock_surface_v1_handle_configure(void *data,
+		struct ext_session_lock_surface_v1 *lock_surface, uint32_t serial,
+		uint32_t width, uint32_t height) {
+	struct swaylock_surface *surface = data;
+	surface->width = width;
+	surface->height = height;
+	surface->indicator_width = 0;
+	surface->indicator_height = 0;
+	ext_session_lock_surface_v1_ack_configure(lock_surface, serial);
+	render_frame_background(surface);
+	render_frame(surface);
+}
+
+static const struct ext_session_lock_surface_v1_listener ext_session_lock_surface_v1_listener = {
+	.configure = ext_session_lock_surface_v1_handle_configure,
+};
+
 static const struct wl_callback_listener surface_frame_listener;
 
 static void surface_frame_handle_done(void *data, struct wl_callback *callback,
@@ -403,6 +435,11 @@ static const struct wl_callback_listener surface_frame_listener = {
 };
 
 void damage_surface(struct swaylock_surface *surface) {
+	if (surface->width == 0 || surface->height == 0) {
+		// Not yet configured
+		return;
+	}
+
 	surface->dirty = true;
 	if (surface->frame_pending) {
 		return;
@@ -453,11 +490,24 @@ static void handle_wl_output_scale(void *data, struct wl_output *output,
 	}
 }
 
+static void handle_wl_output_name(void *data, struct wl_output *output,
+		const char *name) {
+	struct swaylock_surface *surface = data;
+	surface->output_name = strdup(name);
+}
+
+static void handle_wl_output_description(void *data, struct wl_output *output,
+		const char *description) {
+	// Who cares
+}
+
 struct wl_output_listener _wl_output_listener = {
 	.geometry = handle_wl_output_geometry,
 	.mode = handle_wl_output_mode,
 	.done = handle_wl_output_done,
 	.scale = handle_wl_output_scale,
+	.name = handle_wl_output_name,
+	.description = handle_wl_output_description,
 };
 
 static struct wl_buffer *create_shm_buffer(struct wl_shm *shm, enum wl_shm_format fmt,
@@ -637,14 +687,24 @@ static const struct zwlr_screencopy_frame_v1_listener screencopy_frame_listener 
 	.failed = handle_screencopy_frame_failed,
 };
 
+static void handle_xdg_output_logical_position(void *data,
+		struct zxdg_output_v1 *output, int x, int y) {
+	// Who cares
+}
+
 static void handle_xdg_output_logical_size(void *data, struct zxdg_output_v1 *output,
 		int width, int height) {
 	// Who cares
 }
 
-static void handle_xdg_output_logical_position(void *data,
-		struct zxdg_output_v1 *output, int x, int y) {
+static void ext_session_lock_v1_handle_locked(void *data, struct ext_session_lock_v1 *lock) {
 	// Who cares
+}
+
+static void ext_session_lock_v1_handle_finished(void *data, struct ext_session_lock_v1 *lock) {
+	swaylock_log(LOG_ERROR, "Failed to lock session -- "
+			"is another lockscreen running?");
+	exit(2);
 }
 
 static void handle_xdg_output_name(void *data, struct zxdg_output_v1 *output,
@@ -702,6 +762,11 @@ struct zxdg_output_v1_listener _xdg_output_listener = {
 	.description = handle_xdg_output_description,
 };
 
+static const struct ext_session_lock_v1_listener ext_session_lock_v1_listener = {
+	.locked = ext_session_lock_v1_handle_locked,
+	.finished = ext_session_lock_v1_handle_finished,
+};
+
 static void handle_global(void *data, struct wl_registry *registry,
 		uint32_t name, const char *interface, uint32_t version) {
 
@@ -736,18 +801,21 @@ static void handle_global(void *data, struct wl_registry *registry,
 			calloc(1, sizeof(struct swaylock_surface));
 		surface->state = state;
 		surface->output = wl_registry_bind(registry, name,
-				&wl_output_interface, 3);
+				&wl_output_interface, 4);
 		surface->output_global_name = name;
 		wl_output_add_listener(surface->output, &_wl_output_listener, surface);
 		wl_list_insert(&state->surfaces, &surface->link);
 
 		if (state->run_display) {
-			create_layer_surface(surface);
+			create_surface(surface);
 			wl_display_roundtrip(state->display);
 		}
 	} else if (strcmp(interface, zwlr_screencopy_manager_v1_interface.name) == 0) {
 		state->screencopy_manager = wl_registry_bind(registry, name,
 				&zwlr_screencopy_manager_v1_interface, 1);
+	} else if (strcmp(interface, ext_session_lock_manager_v1_interface.name) == 0) {
+		state->ext_session_lock_manager_v1 = wl_registry_bind(registry, name,
+				&ext_session_lock_manager_v1_interface, 1);
 	}
 }
 
@@ -767,6 +835,12 @@ static const struct wl_registry_listener registry_listener = {
 	.global = handle_global,
 	.global_remove = handle_global_remove,
 };
+
+static int sigusr_fds[2] = {-1, -1};
+
+void do_sigusr(int sig) {
+	(void)write(sigusr_fds[1], "1", 1);
+}
 
 static cairo_surface_t *select_image(struct swaylock_state *state,
 		struct swaylock_surface *surface) {
@@ -1718,8 +1792,38 @@ static void timer_render(void *data) {
 	loop_add_timer(state->eventloop, 1000, timer_render, state);
 }
 
-int main(int argc, char **argv) {
+static void term_in(int fd, short mask, void *data) {
+	state.run_display = false;
+}
+
+// Check for --debug 'early' we also apply the correct loglevel
+// to the forked child, without having to first proces all of the
+// configuration (including from file) before forking and (in the
+// case of the shadow backend) dropping privileges
+void log_init(int argc, char **argv) {
+	static struct option long_options[] = {
+		{"debug", no_argument, NULL, 'd'},
+        {0, 0, 0, 0}
+    };
+    int c;
+	optind = 1;
+    while (1) {
+		int opt_idx = 0;
+		c = getopt_long(argc, argv, "d", long_options, &opt_idx);
+		if (c == -1) {
+			break;
+		}
+		switch (c) {
+		case 'd':
+			swaylock_log_init(LOG_DEBUG);
+			return;
+		}
+	}
 	swaylock_log_init(LOG_ERROR);
+}
+
+int main(int argc, char **argv) {
+	log_init(argc, argv);
 	initialize_pw_backend(argc, argv);
 	srand(time(NULL));
 
@@ -1796,13 +1900,17 @@ int main(int argc, char **argv) {
 		state.auth_state = AUTH_STATE_GRACE;
 	}
 
-#ifdef __linux__
-	// Most non-linux platforms require root to mlock()
-	if (mlock(state.password.buffer, sizeof(state.password.buffer)) != 0) {
-		swaylock_log(LOG_ERROR, "Unable to mlock() password memory.");
+	state.password.len = 0;
+	state.password.buffer_len = 1024;
+	state.password.buffer = password_buffer_create(state.password.buffer_len);
+	if (!state.password.buffer) {
 		return EXIT_FAILURE;
 	}
-#endif
+
+	if (pipe(sigusr_fds) != 0) {
+		swaylock_log(LOG_ERROR, "Failed to pipe");
+		return 1;
+	}
 
 	wl_list_init(&state.surfaces);
 	state.xkb.context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -1818,20 +1926,15 @@ int main(int argc, char **argv) {
 	struct wl_registry *registry = wl_display_get_registry(state.display);
 	wl_registry_add_listener(registry, &registry_listener, &state);
 	wl_display_roundtrip(state.display);
-	assert(state.compositor && state.layer_shell && state.shm);
-	if (!state.input_inhibit_manager) {
-		free(state.args.font);
-		swaylock_log(LOG_ERROR, "Compositor does not support the input "
-				"inhibitor protocol, refusing to run insecurely");
+
+	if (!state.compositor) {
+		swaylock_log(LOG_ERROR, "Missing wl_compositor");
 		return 1;
 	}
 
-	zwlr_input_inhibit_manager_v1_get_inhibitor(state.input_inhibit_manager);
-	if (wl_display_roundtrip(state.display) == -1) {
-		free(state.args.font);
-		swaylock_log(LOG_ERROR, "Exiting - failed to inhibit input:"
-				" is another lockscreen already running?");
-		return 2;
+	if (!state.subcompositor) {
+		swaylock_log(LOG_ERROR, "Missing wl_subcompositor");
+		return 1;
 	}
 
 	// Must daemonize before we run any effects, since effects use openmp
@@ -1848,9 +1951,38 @@ int main(int argc, char **argv) {
 				iter_image->cairo_surface, &state, 1);
 	}
 
+	if (!state.shm) {
+		swaylock_log(LOG_ERROR, "Missing wl_shm");
+		return 1;
+	}
+
+	if (state.ext_session_lock_manager_v1) {
+		swaylock_log(LOG_DEBUG, "Using ext-session-lock-v1");
+		state.ext_session_lock_v1 = ext_session_lock_manager_v1_lock(state.ext_session_lock_manager_v1);
+		ext_session_lock_v1_add_listener(state.ext_session_lock_v1,
+				&ext_session_lock_v1_listener, &state);
+	} else if (state.layer_shell && state.input_inhibit_manager) {
+		swaylock_log(LOG_DEBUG, "Using wlr-layer-shell + wlr-input-inhibitor");
+		zwlr_input_inhibit_manager_v1_get_inhibitor(state.input_inhibit_manager);
+	} else {
+		swaylock_log(LOG_ERROR, "Missing ext-session-lock-v1, wlr-layer-shell "
+				"and wlr-input-inhibitor");
+		return 1;
+	}
+
+	if (wl_display_roundtrip(state.display) == -1) {
+		free(state.args.font);
+		if (state.input_inhibit_manager) {
+			swaylock_log(LOG_ERROR, "Exiting - failed to inhibit input:"
+					" is another lockscreen already running?");
+			return 2;
+		}
+		return 1;
+	}
+
 	struct swaylock_surface *surface;
 	wl_list_for_each(surface, &state.surfaces, link) {
-		create_layer_surface(surface);
+		create_surface(surface);
 	}
 
 	wl_list_for_each(surface, &state.surfaces, link) {
@@ -1879,6 +2011,8 @@ int main(int argc, char **argv) {
 
 	// Re-draw once to start the draw loop
 	damage_state(&state);
+	loop_add_fd(state.eventloop, sigusr_fds[0], POLLIN, term_in, NULL);
+	signal(SIGUSR1, do_sigusr);
 
 	state.run_display = true;
 	while (state.run_display) {
@@ -1887,6 +2021,11 @@ int main(int argc, char **argv) {
 			break;
 		}
 		loop_poll(state.eventloop);
+	}
+
+	if (state.ext_session_lock_v1) {
+		ext_session_lock_v1_unlock_and_destroy(state.ext_session_lock_v1);
+		wl_display_roundtrip(state.display);
 	}
 
 	if (state.args.daemonize && state.args.fade_in) {
