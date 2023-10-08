@@ -1734,7 +1734,49 @@ static void comm_in(int fd, short mask, void *data) {
 
 static void toolbar_in(int fd, short mask, void *data) {
 	FILE *fp = data;
-	fgets(state.toolbar_text, sizeof(state.toolbar_text), fp);
+	if (fgets(state.toolbar_text, sizeof(state.toolbar_text), fp)) {
+		state.toolbar_text[strlen(state.toolbar_text) - 1] = '\0';
+	}
+}
+
+#define READ 0
+#define WRITE 1
+
+static pid_t popen2(const char *command, int *infp, int *outfp)
+{
+    int p_stdin[2], p_stdout[2];
+    pid_t pid;
+
+    if (pipe(p_stdin) != 0 || pipe(p_stdout) != 0)
+        return -1;
+
+    pid = fork();
+
+    if (pid < 0)
+        return pid;
+    else if (pid == 0)
+    {
+        close(p_stdin[WRITE]);
+        dup2(p_stdin[READ], READ);
+        close(p_stdout[READ]);
+        dup2(p_stdout[WRITE], WRITE);
+
+        execl("/bin/sh", "sh", "-c", command, NULL);
+        perror("execl");
+        exit(1);
+    }
+
+    if (infp == NULL)
+        close(p_stdin[WRITE]);
+    else
+        *infp = p_stdin[WRITE];
+
+    if (outfp == NULL)
+        close(p_stdout[READ]);
+    else
+        *outfp = p_stdout[READ];
+
+    return pid;
 }
 
 static void timer_render(void *data) {
@@ -1902,12 +1944,15 @@ int main(int argc, char **argv) {
 		loop_add_timer(state.eventloop, state.args.password_grace_period, end_grace_period, &state);
 	}
 
+	pid_t toolbar_pid = 0;
 	if (state.args.toolbar_command) {
-		FILE *toolbar_file = popen(state.args.toolbar_command, "r");
+		int toolbar_in_fd = 0, toolbar_out_fd = 0;
+		toolbar_pid = popen2(state.args.toolbar_command, &toolbar_in_fd, &toolbar_out_fd);
+		FILE *toolbar_file = fdopen(toolbar_out_fd, "r");
 		strcpy(state.toolbar_text, "eile mit weile");
-		int toolbar_fd = fileno(toolbar_file);
-		//toolbar_in(toolbar_fd, 0, toolbar_file);
-		loop_add_fd(state.eventloop, toolbar_fd, POLLIN, toolbar_in, toolbar_file);
+		loop_add_fd(state.eventloop, toolbar_out_fd, POLLIN, toolbar_in, toolbar_file);
+	} else {
+		strcpy(state.toolbar_text, "");
 	}
 	// Re-draw once to start the draw loop
 	damage_state(&state);
@@ -1926,6 +1971,6 @@ int main(int argc, char **argv) {
 	}
 
 	free(state.args.font);
-	//pclose(toolbar_file);
+	if (toolbar_pid) kill(toolbar_pid, SIGTERM);
 	return 0;
 }
