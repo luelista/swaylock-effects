@@ -449,6 +449,7 @@ void render_frame(struct swaylock_surface *surface) {
 				new_width = extents.width + 2 * box_padding;
 			}
 		}
+
 	}
 
 	// Ensure buffer size is multiple of buffer scale - required by protocol
@@ -469,6 +470,75 @@ void render_frame(struct swaylock_surface *surface) {
 	wl_surface_commit(surface->child);
 
 	wl_surface_commit(surface->surface);
+}
+
+
+void render_toolbar(struct swaylock_surface *surface) {
+	struct swaylock_state *state = surface->state;
+
+	wl_subsurface_set_position(surface->toolbar_subsurface, 0, 0);
+
+
+	int buffer_width = surface->width * surface->scale;
+	int buffer_height = 100;  // TODO figure out toolbar height
+	if (buffer_width == 0 || buffer_height == 0) {
+		return; // not yet configured
+	}
+
+	surface->current_buffer = get_next_buffer(state->shm,
+			surface->toolbar_buffers, buffer_width, buffer_height);
+	if (surface->current_buffer == NULL) {
+		return;
+	}
+
+	cairo_t *cairo = surface->current_buffer->cairo;
+	cairo_set_antialias(cairo, CAIRO_ANTIALIAS_BEST);
+
+	// Clear
+	cairo_save(cairo);
+	cairo_set_source_rgba(cairo, 0, 0, 0, 0);
+	cairo_set_operator(cairo, CAIRO_OPERATOR_SOURCE);
+	cairo_paint(cairo);
+	cairo_restore(cairo);
+
+	char toolbar_text[255];
+	static int ctr = 0;
+	snprintf(toolbar_text, 255, "meow <3     %d", ctr++);
+	if (true) {
+		cairo_text_extents_t extents;
+		cairo_font_extents_t fe;
+		//double x, y;
+		double box_padding = 4.0 * surface->scale;
+		cairo_set_font_size(cairo, 16);
+		cairo_text_extents(cairo, state->toolbar_text, &extents);
+		cairo_font_extents(cairo, &fe);
+		// upper left coordinates for box
+		//x = (buffer_width / 2) - (extents.width / 2) - box_padding;
+		//y = buffer_diameter;
+
+		// background box
+		cairo_rectangle(cairo, 0, 0,
+			surface->width,
+			fe.height + 2.0 * box_padding);
+		cairo_set_source_u32(cairo, 0x00000033);
+		cairo_fill_preserve(cairo);
+
+		// take font extents and padding into account
+		cairo_move_to(cairo,
+			box_padding,
+			box_padding + (fe.height - fe.descent));
+		cairo_set_source_u32(cairo, 0xffffffff);
+		cairo_show_text(cairo, state->toolbar_text);
+		//cairo_new_sub_path(cairo);
+	}
+	
+	wl_surface_set_buffer_scale(surface->toolbar_child, surface->scale);
+	wl_surface_attach(surface->toolbar_child, surface->current_buffer->buffer, 0, 0);
+	wl_surface_damage_buffer(surface->toolbar_child, 0, 0, INT32_MAX, INT32_MAX);
+	wl_surface_commit(surface->toolbar_child);
+
+	wl_surface_commit(surface->surface);
+
 }
 
 void render_frames(struct swaylock_state *state) {

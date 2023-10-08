@@ -253,6 +253,8 @@ static void destroy_surface(struct swaylock_surface *surface) {
 	destroy_buffer(&surface->buffers[1]);
 	destroy_buffer(&surface->indicator_buffers[0]);
 	destroy_buffer(&surface->indicator_buffers[1]);
+	destroy_buffer(&surface->toolbar_buffers[0]);
+	destroy_buffer(&surface->toolbar_buffers[1]);
 	fade_destroy(&surface->fade);
 	wl_output_destroy(surface->output);
 	free(surface);
@@ -306,6 +308,12 @@ static void create_layer_surface(struct swaylock_surface *surface) {
 	assert(surface->subsurface);
 	wl_subsurface_set_sync(surface->subsurface);
 
+	surface->toolbar_child = wl_compositor_create_surface(state->compositor);
+	assert(surface->toolbar_child);
+	surface->toolbar_subsurface = wl_subcompositor_get_subsurface(state->subcompositor, surface->toolbar_child, surface->surface);
+	assert(surface->toolbar_subsurface);
+	wl_subsurface_set_sync(surface->toolbar_subsurface);
+
 	surface->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
 			state->layer_shell, surface->surface, surface->output,
 			ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "lockscreen");
@@ -342,6 +350,7 @@ static void initially_render_surface(struct swaylock_surface *surface) {
 	render_frame_background(surface);
 	render_background_fade_prepare(surface, surface->current_buffer);
 	render_frame(surface);
+	render_toolbar(surface);
 }
 
 static void layer_surface_configure(void *data,
@@ -395,6 +404,7 @@ static void surface_frame_handle_done(void *data, struct wl_callback *callback,
 		}
 
 		render_frame(surface);
+		render_toolbar(surface);
 	}
 }
 
@@ -962,6 +972,7 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 		LO_GRACE,
 		LO_GRACE_NO_MOUSE,
 		LO_GRACE_NO_TOUCH,
+		LO_TOOLBAR_COMMAND,
 	};
 
 	static struct option long_options[] = {
@@ -1037,6 +1048,7 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 		{"grace", required_argument, NULL, LO_GRACE},
 		{"grace-no-mouse", no_argument, NULL, LO_GRACE_NO_MOUSE},
 		{"grace-no-touch", no_argument, NULL, LO_GRACE_NO_TOUCH},
+		{"toolbar-command", required_argument, NULL, LO_TOOLBAR_COMMAND},
 		{0, 0, 0, 0}
 	};
 
@@ -1193,6 +1205,8 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 			"Apply a custom effect from a shared object or C source file.\n"
 		"  --time-effects                   "
 			"Measure the time it takes to run each effect.\n"
+		"  --toolbar-command <command>           "
+			"Display a toolbar with the output from command (e.g. i3status).\n"
 		"\n"
 		"All <color> options are of the form <rrggbb[aa]>.\n";
 
@@ -1600,6 +1614,12 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 				state->args.password_grace_no_touch = true;
 			}
 			break;
+		case LO_TOOLBAR_COMMAND:
+			if (state) {
+				free(state->args.toolbar_command);
+				state->args.toolbar_command = strdup(optarg);
+			}
+			break;
 		default:
 			fprintf(stderr, "%s", usage);
 			return 1;
@@ -1710,6 +1730,11 @@ static void comm_in(int fd, short mask, void *data) {
 		++state.failed_attempts;
 		damage_state(&state);
 	}
+}
+
+static void toolbar_in(int fd, short mask, void *data) {
+	FILE *fp = data;
+	fgets(state.toolbar_text, sizeof(state.toolbar_text), fp);
 }
 
 static void timer_render(void *data) {
@@ -1877,6 +1902,13 @@ int main(int argc, char **argv) {
 		loop_add_timer(state.eventloop, state.args.password_grace_period, end_grace_period, &state);
 	}
 
+	if (state.args.toolbar_command) {
+		FILE *toolbar_file = popen(state.args.toolbar_command, "r");
+		strcpy(state.toolbar_text, "eile mit weile");
+		int toolbar_fd = fileno(toolbar_file);
+		//toolbar_in(toolbar_fd, 0, toolbar_file);
+		loop_add_fd(state.eventloop, toolbar_fd, POLLIN, toolbar_in, toolbar_file);
+	}
 	// Re-draw once to start the draw loop
 	damage_state(&state);
 
@@ -1894,5 +1926,6 @@ int main(int argc, char **argv) {
 	}
 
 	free(state.args.font);
+	//pclose(toolbar_file);
 	return 0;
 }

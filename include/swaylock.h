@@ -80,6 +80,7 @@ struct swaylock_args {
 	uint32_t password_grace_period;
 	bool password_grace_no_mouse;
 	bool password_grace_no_touch;
+	char *toolbar_command;
 };
 
 struct swaylock_password {
@@ -110,6 +111,7 @@ struct swaylock_state {
 	size_t n_screenshots_done;
 	bool run_display;
 	struct zxdg_output_manager_v1 *zxdg_output_manager;
+	char toolbar_text[1024];
 };
 
 struct swaylock_surface {
@@ -127,10 +129,13 @@ struct swaylock_surface {
 	struct wl_surface *surface;
 	struct wl_surface *child; // surface made into subsurface
 	struct wl_subsurface *subsurface;
+	struct wl_surface *toolbar_child; // surface made into subsurface
+	struct wl_subsurface *toolbar_subsurface;
 	struct zwlr_layer_surface_v1 *layer_surface;
 	struct zwlr_screencopy_frame_v1 *screencopy_frame;
 	struct pool_buffer buffers[2];
 	struct pool_buffer indicator_buffers[2];
+	struct pool_buffer toolbar_buffers[2];
 	struct pool_buffer *current_buffer;
 	struct swaylock_fade fade;
 	int events_pending;
@@ -161,6 +166,7 @@ void render_frame_background(struct swaylock_surface *surface);
 void render_background_fade(struct swaylock_surface *surface, uint32_t time);
 void render_background_fade_prepare(struct swaylock_surface *surface, struct pool_buffer *buffer);
 void render_frame(struct swaylock_surface *surface);
+void render_toolbar(struct swaylock_surface *surface);
 void render_frames(struct swaylock_state *state);
 void damage_surface(struct swaylock_surface *surface);
 void damage_state(struct swaylock_state *state);
